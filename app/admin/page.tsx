@@ -6,6 +6,7 @@ import { supabase } from "@/lib/supabaseClient";
 type Manga = {
   id: string;
   title: string;
+  title_kana?: string;
   cover: string;
   summary: string;
   good_reviews: string[];
@@ -13,13 +14,16 @@ type Manga = {
   amazon_link?: string;
   wikipedia_link?: string;
   official_link?: string;
-  user_id?: string;
+  rakuten_link?: string;
+  source_urls?: string[];
 };
 
-const ADMIN_UUID = "65935db6-641f-4344-bb2f-46a7c180c59f";
+type AuthorInput = { name: string };
+
 const initForm: Manga = {
   id: "",
   title: "",
+  title_kana: "",
   cover: "",
   summary: "",
   good_reviews: [],
@@ -27,180 +31,490 @@ const initForm: Manga = {
   amazon_link: "",
   wikipedia_link: "",
   official_link: "",
+  rakuten_link: "",
+  source_urls: [],
+};
+
+const RAKUTEN_API = "https://app.rakuten.co.jp/services/api/IchibaItem/Search/20170706";
+const RAKUTEN_BOOKS_API = "https://app.rakuten.co.jp/services/api/BooksBook/Search/20170404";
+const RAKUTEN_GENRE_MANGA = 101299; // 楽天市場 漫画カテゴリ
+
+// 楽天ブックス検索結果アフィリエイトリンク用（あなたの計測IDに置き換え）
+const RAKUTEN_BOOKS_AFFILIATE_BASE =
+  "https://hb.afl.rakuten.co.jp/hgc/16fadf06.5e5fb472.16fadf07.8208f37e/?pc=";
+const RAKUTEN_BOOKS_AFFILIATE_SUFFIX =
+  "&link_type=hybrid_url&ut=eyJwYWdlIjoidXJsIiwidHlwZSI6Imh5YnJpZF91cmwiLCJjb2wiOjF9";
+
+// 画像URLを600x600に変換
+const to600Image = (url: string) => {
+  if (!url) return url;
+  if (url.includes("_ex=")) {
+    return url.replace(/_ex=\d+x\d+/, "_ex=600x600");
+  }
+  return url.replace(/(\d{2,4}x\d{2,4})/, "600x600");
 };
 
 export default function AdminPage() {
-  const [list, setList] = useState<Manga[]>([]);
   const [form, setForm] = useState<Manga>(initForm);
-  const [uid, setUid] = useState<string | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [authors, setAuthors] = useState<AuthorInput[]>([{ name: "" }]);
+  const [loading, setLoading] = useState(false);
+  const [aiResult, setAiResult] = useState("");
+  const [list, setList] = useState<Manga[]>([]);
 
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (!data.user) {
-        window.location.href = "/login"; // 未ログインならログインページへ
-        return;
-      }
-      const id = data.user.id;
-      setUid(id);
-      setIsAdmin(id === ADMIN_UUID);
-      fetchManga(id === ADMIN_UUID, id);
-    });
-  }, []);
+  const fetchList = async () => {
+    const { data } = await supabase.from("manga").select("id,title,title_kana").order("title_kana");
+    setList(data || []);
+  };
+  useEffect(() => { fetchList(); }, []);
 
-  async function fetchManga(admin: boolean, id: string | null) {
-    let q = supabase.from("manga").select("*").order("updated_at", { ascending: false });
-    if (!admin && id) q = q.eq("user_id", id);
-    const { data } = await q;
-    if (data) setList(data as Manga[]);
-  }
-
-  function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
-    setForm(prev => ({
-      ...prev,
-      [name]: name.includes("reviews")
-        ? value.split(",").map(v => v.trim()).filter(Boolean)
-        : value
-    }));
-  }
-
-  async function handleSave() {
-    if (!form.id) return alert("IDは必須です");
-    if (!uid) return alert("ログインしてください");
-
-    const { error } = await supabase.from("manga").upsert({
-      ...form,
-      user_id: uid,
-      updated_at: new Date().toISOString(),
-    });
-    if (error) return alert(`保存に失敗しました: ${error.message}`);
-    alert("保存しました");
-    setForm(initForm);
-    fetchManga(isAdmin, uid);
-  }
-
-  function handleEdit(m: Manga) {
-    setForm(m);
-  }
-
-  async function handleDelete(id: string) {
-    if (!confirm("削除しますか？")) return;
-    const { error } = await supabase.from("manga").delete().eq("id", id);
-    if (!error) fetchManga(isAdmin, uid);
-  }
-
-  async function handleAiFetch() {
-    if (!form.id || !form.title) return alert("IDとタイトルを入力してください");
-    const res = await fetch("/api/fetchMangaInfo", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: form.id, title: form.title }),
-    });
-    const data = await res.json();
-    if (data.error) return alert(`AI取得に失敗しました: ${data.error}`);
-    setForm(prev => ({
-      ...prev,
-      summary: data.summary || prev.summary,
-      good_reviews: data.good_reviews || prev.good_reviews,
-      bad_reviews: data.bad_reviews || prev.bad_reviews,
-      amazon_link: data.amazon_link || prev.amazon_link,
-      wikipedia_link: data.wikipedia_link || prev.wikipedia_link,
-      official_link: data.official_link || prev.official_link,
-    }));
-  }
-
-  const sectionStyle = {
-    background: "#fff",
-    color: "#000",
-    padding: "1rem",
-    borderRadius: "8px",
-    marginBottom: "2rem",
-    border: "1px solid #ccc",
+    setForm((prev) => ({ ...prev, [name]: value }));
   };
 
+  const addAuthor = () => setAuthors([...authors, { name: "" }]);
+  const updateAuthor = (i: number, value: string) => {
+    const updated = [...authors];
+    updated[i].name = value;
+    setAuthors(updated);
+  };
+  const removeAuthor = (i: number) => setAuthors(authors.filter((_, idx) => idx !== i));
+
+  const handleSave = async () => {
+    setLoading(true);
+    try {
+      const payload = {
+        ...form,
+        updated_at: new Date().toISOString(),
+      };
+
+      const { data: mangaData, error: mangaError } = await supabase
+        .from("manga")
+        .upsert(payload)
+        .select()
+        .single();
+
+      if (mangaError) throw mangaError;
+
+      const uniqueNames = Array.from(new Set(authors.map(a => a.name.trim()).filter(Boolean)));
+      for (const name of uniqueNames) {
+        let { data: existing } = await supabase
+          .from("authors")
+          .select("id")
+          .eq("name", name)
+          .single();
+
+        if (!existing) {
+          const { data: newAuthor } = await supabase
+            .from("authors")
+            .insert([{ name }])
+            .select()
+            .single();
+          existing = newAuthor;
+        }
+
+        await supabase.from("manga_authors").upsert({
+          manga_id: mangaData.id,
+          author_id: existing.id
+        });
+      }
+
+      alert("保存しました");
+      if (!form.id && mangaData?.id) {
+        setForm(prev => ({ ...prev, id: mangaData.id }));
+      }
+      fetchList();
+    } catch (err: any) {
+      alert(`保存に失敗しました: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEdit = async (id: string) => {
+    const { data } = await supabase.from("manga").select("*").eq("id", id).single();
+    if (data) {
+      setForm({
+        ...data,
+        good_reviews: data.good_reviews || [],
+        bad_reviews: data.bad_reviews || [],
+        source_urls: data.source_urls || [],
+      });
+      const { data: authorData } = await supabase
+        .from("manga_authors")
+        .select("authors(name)")
+        .eq("manga_id", id);
+      if (authorData) {
+        setAuthors(authorData.map((a: any) => ({ name: a.authors.name })));
+      }
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm("削除しますか？")) return;
+    await supabase.from("manga").delete().eq("id", id);
+    fetchList();
+  };
+
+  // 楽天ブックス検索結果アフィリエイトリンク生成
+  const handleRakutenBooksLinkFetch = () => {
+    if (!form.title) {
+      alert("タイトルを入力してください");
+      return;
+    }
+    const searchUrl = `https://books.rakuten.co.jp/search?sitem=${encodeURIComponent(form.title)}&g=000&l-id=pc-search-box`;
+    const affiliateUrl =
+      RAKUTEN_BOOKS_AFFILIATE_BASE + encodeURIComponent(searchUrl) + RAKUTEN_BOOKS_AFFILIATE_SUFFIX;
+    setForm(prev => ({
+      ...prev,
+      rakuten_link: affiliateUrl
+    }));
+  };
+
+  // 楽天ブックス優先＋楽天市場フォールバック（「タイトル1」で検索）
+  const handleRakutenImageFetch = async () => {
+    if (!form.title) {
+      alert("タイトルを入力してください");
+      return;
+    }
+    const keyword = `${form.title}1`;
+
+    // 1. 楽天ブックスAPI
+    try {
+      const resBooks = await fetch(
+        `${RAKUTEN_BOOKS_API}?applicationId=${process.env.NEXT_PUBLIC_RAKUTEN_APP_ID}&title=${encodeURIComponent(keyword)}&hits=10&imageFlag=1&formatVersion=2`
+      );
+      const dataBooks = await resBooks.json();
+
+      if (dataBooks.Items?.length > 0) {
+        const firstVol = dataBooks.Items.find((it: any) =>
+          /1巻|第1巻|1$/.test(it.title)
+        ) || dataBooks.Items[0];
+
+        const imgUrl = firstVol.mediumImageUrl || "";
+        if (imgUrl) {
+          setForm(prev => ({
+            ...prev,
+            cover: to600Image(imgUrl)
+          }));
+          return;
+        }
+      }
+    } catch {
+      // ブックスAPI失敗時はフォールバックへ
+    }
+
+    // 2. 楽天市場API
+    try {
+      const resIchiba = await fetch(
+        `${RAKUTEN_API}?applicationId=${process.env.NEXT_PUBLIC_RAKUTEN_APP_ID}&keyword=${encodeURIComponent(keyword)}&genreId=${RAKUTEN_GENRE_MANGA}&hits=10&imageFlag=1&formatVersion=2`
+      );
+      const dataIchiba = await resIchiba.json();
+
+      if (dataIchiba.Items?.length > 0) {
+        const firstVol = dataIchiba.Items.find((it: any) =>
+          /1巻|第1巻|1$/.test(it.Item.itemName)
+        )?.Item || dataIchiba.Items[0].Item;
+
+        const imgUrl = firstVol.mediumImageUrls?.[0]?.imageUrl || "";
+        if (imgUrl) {
+          setForm(prev => ({
+            ...prev,
+            cover: to600Image(imgUrl)
+          }));
+          return;
+        }
+      }
+      alert("楽天ブックス・楽天市場ともに1巻の商品が見つかりませんでした");
+    } catch {
+      alert("画像取得に失敗しました");
+    }
+  };
+
+  // AI取得（表紙画像は取得しない）
+  const handleAiFetch = async () => {
+    if (!form.title) {
+      alert("タイトルを入力してください");
+      return;
+    }
+    setLoading(true);
+    try {
+      const sourceUrlsText = (form.source_urls && form.source_urls.length > 0)
+        ? `参考用URLとして以下を必ず参照してください:\n${form.source_urls.join("\n")}`
+        : "";
+
+      const prompt = `
+漫画タイトル「${form.title}」について、以下の条件で情報をJSON形式で返してください。
+
+- "good_reviews" と "bad_reviews" は、日本語のウェブサイトの情報のみを参照してください。
+- それ以外の項目は、日本語のウェブサイト（公式サイト、出版社サイト、日本語のニュースサイト、Wikipedia日本語版、レビューサイトなど）の情報のみを参照してください。
+- "source_urls" はAIで取得しないでください。${sourceUrlsText}
+
+返すJSONの形式:
+{
+  "title_kana": "カタカナ読み仮名",
+  "authors": ["作者名1", "作者名2"],
+  "summary": "あらすじ",
+  "good_reviews": ["良い評価1", "良い評価2"],
+  "bad_reviews": ["悪い評価1", "悪い評価2"],
+  "official_link": "公式サイトURL",
+  "amazon_link": "Amazon日本のシリーズページURL",
+  "wikipedia_link": "WikipediaURL"
+}
+      `.trim();
+
+      const res = await fetch("/api/ai-fetch", {
+        method: "POST",
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await res.json();
+      setAiResult(JSON.stringify(data, null, 2));
+    } catch {
+      alert("AI取得に失敗しました");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyPromptToClipboard = () => {
+    const sourceUrlsText = (form.source_urls && form.source_urls.length > 0)
+      ? `参考用URLとして以下を必ず参照してください:\n${form.source_urls.join("\n")}`
+      : "";
+
+    const prompt = `
+漫画タイトル「${form.title}」について、以下の条件で情報をJSON形式で返してください。
+
+- "good_reviews" と "bad_reviews" は、日本語のウェブサイトの情報のみを参照してください。
+- それ以外の項目は、日本語のウェブサイト（公式サイト、出版社サイト、日本語のニュースサイト、Wikipedia日本語版、レビューサイトなど）の情報のみを参照してください。
+- "source_urls" はAIで取得しないでください。${sourceUrlsText}
+
+返すJSONの形式:
+{
+  "title_kana": "カタカナ読み仮名",
+  "authors": ["作者名1", "作者名2"],
+  "summary": "あらすじ",
+  "good_reviews": ["良い評価1", "良い評価2"],
+  "bad_reviews": ["悪い評価1", "悪い評価2"],
+  "official_link": "公式サイトURL",
+  "amazon_link": "Amazon日本のシリーズページURL",
+  "wikipedia_link": "WikipediaURL"
+}
+    `.trim();
+
+    navigator.clipboard.writeText(prompt);
+    alert("プロンプトをコピーしました");
+  };
+
+  const applyAiResult = () => {
+    try {
+      const parsed = JSON.parse(aiResult);
+
+      setForm((prev) => ({
+        ...prev,
+        title_kana: parsed.title_kana || prev.title_kana,
+        summary: parsed.summary || prev.summary,
+        good_reviews: parsed.good_reviews || prev.good_reviews,
+        bad_reviews: parsed.bad_reviews || prev.bad_reviews,
+        official_link: parsed.official_link || prev.official_link,
+        amazon_link: parsed.amazon_link || prev.amazon_link,
+        wikipedia_link: parsed.wikipedia_link || prev.wikipedia_link,
+        source_urls: parsed.source_urls || prev.source_urls,
+      }));
+
+      if (parsed.authors) {
+        const uniqueAuthors = Array.from(new Set(parsed.authors.filter((n: string) => n && n.trim())));
+        setAuthors(uniqueAuthors.map((name: string) => ({ name })));
+      }
+    } catch {
+      alert("AI結果のJSONが不正です");
+    }
+  };
+
+  const sectionStyle = { marginBottom: "2rem" };
+  const labelStyle = { fontWeight: "bold", marginBottom: "0.25rem", color: "#111" };
   const inputStyle = {
+    color: "#111",
+    backgroundColor: "#fff",
+    border: "1px solid #ccc",
     padding: "0.5rem",
-    border: "1px solid #555",
     borderRadius: "4px",
-    fontSize: "14px",
-    color: "#000",
-    background: "#fff",
+    width: "100%",
+    marginBottom: "0.5rem",
   };
 
   return (
-    <main style={{ padding: "2rem", fontFamily: "sans-serif", background: "#fff", color: "#000" }}>
-      <h1 style={{ marginBottom: "1rem" }}>管理画面 {isAdmin && "(管理者)"}</h1>
+    <div className="admin-page" style={{ color: "#111" }}>
+      <h1>漫画登録</h1>
 
-      {/* 入力フォーム */}
-      <section style={sectionStyle}>
-        <h2>{form.id ? "編集" : "新規追加"}</h2>
-        <div style={{ display: "grid", gap: "0.5rem", marginTop: "1rem" }}>
-          {[
-            { name: "id", label: "ID" },
-            { name: "title", label: "タイトル" },
-            { name: "cover", label: "表紙URL" },
-            { name: "summary", label: "あらすじ", textarea: true },
-            { name: "good_reviews", label: "良い評価（カンマ区切り）" },
-            { name: "bad_reviews", label: "悪い評価（カンマ区切り）" },
-            { name: "amazon_link", label: "Amazonリンク" },
-            { name: "wikipedia_link", label: "Wikipediaリンク" },
-            { name: "official_link", label: "公式サイトリンク" },
-          ].map(f => (
-            <div key={f.name} style={{ display: "flex", flexDirection: "column" }}>
-              <label style={{ fontWeight: "bold" }}>{f.label}</label>
-              {f.textarea ? (
-                <textarea
-                  name={f.name}
-                  value={form[f.name as keyof Manga] as string}
-                  onChange={handleChange}
-                  style={inputStyle}
-                />
-              ) : (
-                <input
-                  name={f.name}
-                  value={Array.isArray(form[f.name as keyof Manga])
-                    ? (form[f.name as keyof Manga] as string[]).join(",")
-                    : (form[f.name as keyof Manga] as string)}
-                  onChange={handleChange}
-                  style={inputStyle}
-                />
-              )}
-            </div>
-          ))}
+      {/* 基本情報 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>基本情報</h2>
+        <input style={inputStyle} name="id" placeholder="ID（空欄で新規）" value={form.id} onChange={handleChange} />
+        <input style={inputStyle} name="title" placeholder="タイトル" value={form.title} onChange={handleChange} />
+        <input style={inputStyle} name="title_kana" placeholder="読み仮名（カタカナ）" value={form.title_kana} onChange={handleChange} />
+
+        <input style={inputStyle} name="cover" placeholder="表紙URL" value={form.cover} onChange={handleChange} />
+        {form.cover?.trim() && (
+          <div style={{ marginTop: "0.5rem" }}>
+            <img
+              src={form.cover}
+              alt={`${form.title || "表紙"} プレビュー`}
+              style={{ width: "160px", height: "240px", objectFit: "contain", border: "1px solid #ccc", borderRadius: "4px" }}
+              onError={(e) => { e.currentTarget.style.display = "none"; }}
+            />
+          </div>
+        )}
+        <button type="button" onClick={handleRakutenImageFetch}>楽天画像取得</button>
+
+        <input style={inputStyle} name="rakuten_link" placeholder="楽天アフィリエイトリンク" value={form.rakuten_link || ""} onChange={handleChange} />
+        <button type="button" onClick={handleRakutenBooksLinkFetch}>楽天リンク取得</button>
+      </div>
+
+      {/* 作者 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>作者</h2>
+        {authors.map((a, i) => (
+          <div key={i} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+            <input
+              style={inputStyle}
+              placeholder="名前"
+              value={a.name}
+              onChange={(e) => updateAuthor(i, e.target.value)}
+            />
+            {authors.length > 1 && (
+              <button type="button" onClick={() => removeAuthor(i)}>削除</button>
+            )}
+          </div>
+        ))}
+        <button type="button" onClick={addAuthor}>＋作者追加</button>
+      </div>
+
+      {/* 内容 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>内容</h2>
+        <textarea
+          style={{ ...inputStyle, height: "6rem" }}
+          name="summary"
+          placeholder="あらすじ"
+          value={form.summary}
+          onChange={handleChange}
+        />
+      </div>
+
+      {/* 評価 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>評価</h2>
+        <input
+          style={inputStyle}
+          name="good_reviews"
+          placeholder="良い評価（カンマ区切り）"
+          value={(form.good_reviews || []).join(",")}
+          onChange={(e) =>
+            setForm({ ...form, good_reviews: e.target.value.split(",").map(s => s.trim()) })
+          }
+        />
+        <input
+          style={inputStyle}
+          name="bad_reviews"
+          placeholder="悪い評価（カンマ区切り）"
+          value={(form.bad_reviews || []).join(",")}
+          onChange={(e) =>
+            setForm({ ...form, bad_reviews: e.target.value.split(",").map(s => s.trim()) })
+          }
+        />
+      </div>
+
+      {/* リンク */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>リンク</h2>
+        <input style={inputStyle} name="official_link" placeholder="公式サイトリンク" value={form.official_link} onChange={handleChange} />
+        <input style={inputStyle} name="amazon_link" placeholder="Amazonリンク" value={form.amazon_link} onChange={handleChange} />
+        <input style={inputStyle} name="wikipedia_link" placeholder="Wikipediaリンク" value={form.wikipedia_link} onChange={handleChange} />
+      </div>
+
+      {/* 情報取得 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>情報取得</h2>
+        <textarea
+          style={{ ...inputStyle, height: "6rem" }}
+          name="source_urls"
+          placeholder="情報取得用URL（改行区切り）"
+          value={(form.source_urls || []).join("\n")}
+          onChange={(e) =>
+            setForm({ ...form, source_urls: e.target.value.split("\n").map(s => s.trim()) })
+          }
+        />
+      </div>
+
+      {/* 保存ボタン */}
+      <button type="button" className="button" onClick={handleSave} disabled={loading}>
+        {loading ? "保存中..." : "保存"}
+      </button>
+
+      {/* AI関連 */}
+      <section style={{
+        background: "#f9f9f9",
+        border: "1px solid #ccc",
+        borderRadius: "8px",
+        padding: "1rem",
+        marginTop: "2rem"
+      }}>
+        <h2 style={{ fontWeight: "bold", marginBottom: "0.75rem" }}>AI取得</h2>
+
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+          <button onClick={handleAiFetch} disabled={loading} style={{ padding: "0.5rem 0.75rem" }}>AIで取得</button>
+          <button onClick={copyPromptToClipboard} style={{ padding: "0.5rem 0.75rem" }}>別AI用プロンプトをコピー</button>
         </div>
-        <div style={{ marginTop: "1rem" }}>
-          <button onClick={handleSave} style={{ marginRight: "0.5rem" }}>保存</button>
-          <button onClick={() => setForm(initForm)} style={{ marginRight: "0.5rem" }}>リセット</button>
-          <button onClick={handleAiFetch}>AIで取得</button>
+
+        <label style={labelStyle}>AI取得結果（JSON）</label>
+        <textarea
+          style={{
+            ...inputStyle,
+            height: "10rem",
+            fontFamily: "monospace",
+            background: "#f4f4f4"
+          }}
+          value={aiResult}
+          onChange={(e) => setAiResult(e.target.value)}
+        />
+        <div style={{ marginTop: "0.5rem" }}>
+          <button type="button" onClick={applyAiResult} style={{ padding: "0.5rem 0.75rem" }}>取得結果を適用</button>
         </div>
       </section>
 
-      {/* 一覧表示 */}
-      <section style={sectionStyle}>
-        <h2>登録済み漫画</h2>
-        <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "1rem" }}>
-          <thead>
-            <tr style={{ background: "#0070f3", color: "#fff" }}>
-              <th style={{ padding: "0.5rem", border: "1px solid #ccc" }}>ID</th>
-              <th style={{ padding: "0.5rem", border: "1px solid #ccc" }}>タイトル</th>
-              <th style={{ padding: "0.5rem", border: "1px solid #ccc" }}>操作</th>
+      {/* 登録済み一覧 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>登録済み一覧</h2>
+        <table style={{ width: "100%", borderCollapse: "collapse", border: "1px solid #ccc" }}>
+          <thead style={{ backgroundColor: "#f5f5f5" }}>
+            <tr>
+              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>ID</th>
+              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>タイトル</th>
+              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>読み仮名</th>
+              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>操作</th>
             </tr>
           </thead>
           <tbody>
-            {list.map(m => (
-              <tr key={m.id} style={{ background: "#fafafa" }}>
-                <td style={{ padding: "0.5rem", border: "1px solid #ccc" }}>{m.id}</td>
-                <td style={{ padding: "0.5rem", border: "1px solid #ccc" }}>{m.title}</td>
-                <td style={{ padding: "0.5rem", border: "1px solid #ccc" }}>
-                  <button onClick={() => handleEdit(m)} style={{ marginRight: "0.5rem" }}>編集</button>
+            {list.map((m, idx) => (
+              <tr
+                key={m.id}
+                style={{
+                  backgroundColor: idx % 2 === 0 ? "#fff" : "#fafafa",
+                  borderBottom: "1px solid #eee",
+                }}
+              >
+                <td style={{ padding: "0.5rem" }}>{m.id}</td>
+                <td style={{ padding: "0.5rem" }}>{m.title}</td>
+                <td style={{ padding: "0.5rem" }}>{m.title_kana}</td>
+                <td style={{ padding: "0.5rem" }}>
+                  <button style={{ marginRight: "0.5rem" }} onClick={() => handleEdit(m.id)}>編集</button>
                   <button onClick={() => handleDelete(m.id)}>削除</button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-      </section>
-    </main>
+      </div>
+    </div>
   );
 }

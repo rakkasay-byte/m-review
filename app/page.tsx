@@ -1,7 +1,8 @@
 import { supabase } from "@/lib/supabaseClient";
-import Link from "next/link";
+import MangaGrid from "@/components/MangaGrid/MangaGrid";
 
 export default async function Home() {
+  // DBからマンガ一覧を取得
   const { data: mangaList, error } = await supabase
     .from("manga")
     .select("*")
@@ -14,20 +15,14 @@ export default async function Home() {
   }
 
   return (
-    <main style={{ padding: "2rem" }}>
-      <h1>漫画レビューサイト</h1>
-      <div style={{
-        display: "grid",
-        gap: "1rem",
-        gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))"
-      }}>
-        {mangaList?.map((manga) => (
-          <Link key={manga.id} href={`/manga/${manga.id}`}>
-            <img src={manga.cover} alt={manga.title} style={{ width: "100%" }} />
-            <h2>{manga.title}</h2>
-          </Link>
-        ))}
-      </div>
-    </main>
+    <>
+      {/* ページ固有の見出し */}
+      <h1 style={{ fontSize: "1.5rem", fontWeight: "bold", marginBottom: "1rem" }}>
+        注目のマンガ
+      </h1>
+
+      {/* 共通デザインのカードグリッド */}
+      <MangaGrid items={mangaList || []} />
+    </>
   );
 }
