@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 type Manga = {
-  id: string;
+  id?: string;
   title: string;
   title_kana?: string;
   cover: string;
@@ -19,6 +19,7 @@ type Manga = {
 };
 
 type AuthorInput = { name: string };
+type MagazineInput = { name: string };
 
 const initForm: Manga = {
   id: "",
@@ -37,15 +38,13 @@ const initForm: Manga = {
 
 const RAKUTEN_API = "https://app.rakuten.co.jp/services/api/IchibaItem/Search/20170706";
 const RAKUTEN_BOOKS_API = "https://app.rakuten.co.jp/services/api/BooksBook/Search/20170404";
-const RAKUTEN_GENRE_MANGA = 101299; // 楽天市場 漫画カテゴリ
+const RAKUTEN_GENRE_MANGA = 101299;
 
-// 楽天ブックス検索結果アフィリエイトリンク用（あなたの計測IDに置き換え）
 const RAKUTEN_BOOKS_AFFILIATE_BASE =
   "https://hb.afl.rakuten.co.jp/hgc/16fadf06.5e5fb472.16fadf07.8208f37e/?pc=";
 const RAKUTEN_BOOKS_AFFILIATE_SUFFIX =
   "&link_type=hybrid_url&ut=eyJwYWdlIjoidXJsIiwidHlwZSI6Imh5YnJpZF91cmwiLCJjb2wiOjF9";
 
-// 画像URLを600x600に変換
 const to600Image = (url: string) => {
   if (!url) return url;
   if (url.includes("_ex=")) {
@@ -57,6 +56,7 @@ const to600Image = (url: string) => {
 export default function AdminPage() {
   const [form, setForm] = useState<Manga>(initForm);
   const [authors, setAuthors] = useState<AuthorInput[]>([{ name: "" }]);
+  const [magazines, setMagazines] = useState<MagazineInput[]>([{ name: "" }]);
   const [loading, setLoading] = useState(false);
   const [aiResult, setAiResult] = useState("");
   const [list, setList] = useState<Manga[]>([]);
@@ -80,13 +80,31 @@ export default function AdminPage() {
   };
   const removeAuthor = (i: number) => setAuthors(authors.filter((_, idx) => idx !== i));
 
+  const addMagazine = () => setMagazines([...magazines, { name: "" }]);
+  const updateMagazine = (i: number, value: string) => {
+    const updated = [...magazines];
+    updated[i].name = value;
+    setMagazines(updated);
+  };
+  const removeMagazine = (i: number) => setMagazines(magazines.filter((_, idx) => idx !== i));
+
   const handleSave = async () => {
     setLoading(true);
     try {
-      const payload = {
-        ...form,
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        alert("ログインしてください");
+        setLoading(false);
+        return;
+      }
+
+      const { id, ...rest } = form;
+      const payload: any = {
+        ...rest,
+        user_id: user.id,
         updated_at: new Date().toISOString(),
       };
+      if (id) payload.id = id;
 
       const { data: mangaData, error: mangaError } = await supabase
         .from("manga")
@@ -96,14 +114,14 @@ export default function AdminPage() {
 
       if (mangaError) throw mangaError;
 
-      const uniqueNames = Array.from(new Set(authors.map(a => a.name.trim()).filter(Boolean)));
-      for (const name of uniqueNames) {
+      // 作者登録
+      const uniqueAuthors = Array.from(new Set(authors.map(a => a.name.trim()).filter(Boolean)));
+      for (const name of uniqueAuthors) {
         let { data: existing } = await supabase
           .from("authors")
           .select("id")
           .eq("name", name)
           .single();
-
         if (!existing) {
           const { data: newAuthor } = await supabase
             .from("authors")
@@ -112,10 +130,31 @@ export default function AdminPage() {
             .single();
           existing = newAuthor;
         }
-
         await supabase.from("manga_authors").upsert({
           manga_id: mangaData.id,
           author_id: existing.id
+        });
+      }
+
+      // 雑誌登録
+      const uniqueMagazines = Array.from(new Set(magazines.map(m => m.name.trim()).filter(Boolean)));
+      for (const name of uniqueMagazines) {
+        let { data: existingMagazine } = await supabase
+          .from("magazines")
+          .select("id")
+          .eq("name", name)
+          .single();
+        if (!existingMagazine) {
+          const { data: newMagazine } = await supabase
+            .from("magazines")
+            .insert([{ name }])
+            .select()
+            .single();
+          existingMagazine = newMagazine;
+        }
+        await supabase.from("manga_magazines").upsert({
+          manga_id: mangaData.id,
+          magazine_id: existingMagazine.id
         });
       }
 
@@ -147,6 +186,13 @@ export default function AdminPage() {
       if (authorData) {
         setAuthors(authorData.map((a: any) => ({ name: a.authors.name })));
       }
+      const { data: magazineData } = await supabase
+        .from("manga_magazines")
+        .select("magazines(name)")
+        .eq("manga_id", id);
+      if (magazineData) {
+        setMagazines(magazineData.map((m: any) => ({ name: m.magazines.name })));
+      }
     }
   };
 
@@ -156,7 +202,6 @@ export default function AdminPage() {
     fetchList();
   };
 
-  // 楽天ブックス検索結果アフィリエイトリンク生成
   const handleRakutenBooksLinkFetch = () => {
     if (!form.title) {
       alert("タイトルを入力してください");
@@ -171,7 +216,6 @@ export default function AdminPage() {
     }));
   };
 
-  // 楽天ブックス優先＋楽天市場フォールバック（「タイトル1」で検索）
   const handleRakutenImageFetch = async () => {
     if (!form.title) {
       alert("タイトルを入力してください");
@@ -179,7 +223,7 @@ export default function AdminPage() {
     }
     const keyword = `${form.title}1`;
 
-    // 1. 楽天ブックスAPI
+    // 楽天ブックスAPI
     try {
       const resBooks = await fetch(
         `${RAKUTEN_BOOKS_API}?applicationId=${process.env.NEXT_PUBLIC_RAKUTEN_APP_ID}&title=${encodeURIComponent(keyword)}&hits=10&imageFlag=1&formatVersion=2`
@@ -204,7 +248,7 @@ export default function AdminPage() {
       // ブックスAPI失敗時はフォールバックへ
     }
 
-    // 2. 楽天市場API
+    // 楽天市場API
     try {
       const resIchiba = await fetch(
         `${RAKUTEN_API}?applicationId=${process.env.NEXT_PUBLIC_RAKUTEN_APP_ID}&keyword=${encodeURIComponent(keyword)}&genreId=${RAKUTEN_GENRE_MANGA}&hits=10&imageFlag=1&formatVersion=2`
@@ -231,52 +275,14 @@ export default function AdminPage() {
     }
   };
 
-  // AI取得（表紙画像は取得しない）
+  // AI取得（雑誌対応＋レビュー5件指定）
   const handleAiFetch = async () => {
-    if (!form.title) {
-      alert("タイトルを入力してください");
-      return;
-    }
-    setLoading(true);
-    try {
-      const sourceUrlsText = (form.source_urls && form.source_urls.length > 0)
-        ? `参考用URLとして以下を必ず参照してください:\n${form.source_urls.join("\n")}`
-        : "";
-
-      const prompt = `
-漫画タイトル「${form.title}」について、以下の条件で情報をJSON形式で返してください。
-
-- "good_reviews" と "bad_reviews" は、日本語のウェブサイトの情報のみを参照してください。
-- それ以外の項目は、日本語のウェブサイト（公式サイト、出版社サイト、日本語のニュースサイト、Wikipedia日本語版、レビューサイトなど）の情報のみを参照してください。
-- "source_urls" はAIで取得しないでください。${sourceUrlsText}
-
-返すJSONの形式:
-{
-  "title_kana": "カタカナ読み仮名",
-  "authors": ["作者名1", "作者名2"],
-  "summary": "あらすじ",
-  "good_reviews": ["良い評価1", "良い評価2"],
-  "bad_reviews": ["悪い評価1", "悪い評価2"],
-  "official_link": "公式サイトURL",
-  "amazon_link": "Amazon日本のシリーズページURL",
-  "wikipedia_link": "WikipediaURL"
-}
-      `.trim();
-
-      const res = await fetch("/api/ai-fetch", {
-        method: "POST",
-        body: JSON.stringify({ prompt }),
-      });
-      const data = await res.json();
-      setAiResult(JSON.stringify(data, null, 2));
-    } catch {
-      alert("AI取得に失敗しました");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const copyPromptToClipboard = () => {
+  if (!form.title) {
+    alert("タイトルを入力してください");
+    return;
+  }
+  setLoading(true);
+  try {
     const sourceUrlsText = (form.source_urls && form.source_urls.length > 0)
       ? `参考用URLとして以下を必ず参照してください:\n${form.source_urls.join("\n")}`
       : "";
@@ -284,7 +290,9 @@ export default function AdminPage() {
     const prompt = `
 漫画タイトル「${form.title}」について、以下の条件で情報をJSON形式で返してください。
 
-- "good_reviews" と "bad_reviews" は、日本語のウェブサイトの情報のみを参照してください。
+- "good_reviews" と "bad_reviews" は、日本語のウェブサイトの情報のみを参照し、必ず5件ずつ挙げてください。
+- 評価は必ず原作漫画に関するものだけを対象とし、アニメ版や実写映画版など他メディア化作品の感想は含めないでください。
+- "magazines" は連載雑誌名の配列として返してください（連載途中で変更があれば全て含める）。
 - それ以外の項目は、日本語のウェブサイト（公式サイト、出版社サイト、日本語のニュースサイト、Wikipedia日本語版、レビューサイトなど）の情報のみを参照してください。
 - "source_urls" はAIで取得しないでください。${sourceUrlsText}
 
@@ -292,18 +300,60 @@ export default function AdminPage() {
 {
   "title_kana": "カタカナ読み仮名",
   "authors": ["作者名1", "作者名2"],
+  "magazines": ["雑誌名1", "雑誌名2"],
   "summary": "あらすじ",
-  "good_reviews": ["良い評価1", "良い評価2"],
-  "bad_reviews": ["悪い評価1", "悪い評価2"],
+  "good_reviews": ["良い評価1", "良い評価2", "良い評価3", "良い評価4", "良い評価5"],
+  "bad_reviews": ["悪い評価1", "悪い評価2", "悪い評価3", "悪い評価4", "悪い評価5"],
   "official_link": "公式サイトURL",
   "amazon_link": "Amazon日本のシリーズページURL",
   "wikipedia_link": "WikipediaURL"
 }
     `.trim();
 
-    navigator.clipboard.writeText(prompt);
-    alert("プロンプトをコピーしました");
-  };
+    const res = await fetch("/api/ai-fetch", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await res.json();
+    setAiResult(JSON.stringify(data, null, 2));
+  } catch {
+    alert("AI取得に失敗しました");
+  } finally {
+    setLoading(false);
+  }
+};
+
+  const copyPromptToClipboard = () => {
+  const sourceUrlsText = (form.source_urls && form.source_urls.length > 0)
+    ? `参考用URLとして以下を必ず参照してください:\n${form.source_urls.join("\n")}`
+    : "";
+
+  const prompt = `
+漫画タイトル「${form.title}」について、以下の条件で情報をJSON形式で返してください。
+
+- "good_reviews" と "bad_reviews" は、日本語のウェブサイトの情報のみを参照し、必ず5件ずつ挙げてください。
+- 評価は必ず原作漫画に関するものだけを対象とし、アニメ版や実写映画版など他メディア化作品の感想は含めないでください。
+- "magazines" は連載雑誌名の配列として返してください（連載途中で変更があれば全て含める）。
+- それ以外の項目は、日本語のウェブサイト（公式サイト、出版社サイト、日本語のニュースサイト、Wikipedia日本語版、レビューサイトなど）の情報のみを参照してください。
+- "source_urls" はAIで取得しないでください。${sourceUrlsText}
+
+返すJSONの形式:
+{
+  "title_kana": "カタカナ読み仮名",
+  "authors": ["作者名1", "作者名2"],
+  "magazines": ["雑誌名1", "雑誌名2"],
+  "summary": "あらすじ",
+  "good_reviews": ["良い評価1", "良い評価2", "良い評価3", "良い評価4", "良い評価5"],
+  "bad_reviews": ["悪い評価1", "悪い評価2", "悪い評価3", "悪い評価4", "悪い評価5"],
+  "official_link": "公式サイトURL",
+  "amazon_link": "Amazon日本のシリーズページURL",
+  "wikipedia_link": "WikipediaURL"
+}
+  `.trim();
+
+  navigator.clipboard.writeText(prompt);
+  alert("プロンプトをコピーしました");
+};
 
   const applyAiResult = () => {
     try {
@@ -324,6 +374,10 @@ export default function AdminPage() {
       if (parsed.authors) {
         const uniqueAuthors = Array.from(new Set(parsed.authors.filter((n: string) => n && n.trim())));
         setAuthors(uniqueAuthors.map((name: string) => ({ name })));
+      }
+      if (parsed.magazines) {
+        const uniqueMagazines = Array.from(new Set(parsed.magazines.filter((n: string) => n && n.trim())));
+        setMagazines(uniqueMagazines.map((name: string) => ({ name })));
       }
     } catch {
       alert("AI結果のJSONが不正です");
@@ -387,6 +441,25 @@ export default function AdminPage() {
           </div>
         ))}
         <button type="button" onClick={addAuthor}>＋作者追加</button>
+      </div>
+
+      {/* 連載雑誌 */}
+      <div style={sectionStyle}>
+        <h2 style={labelStyle}>連載雑誌</h2>
+        {magazines.map((m, i) => (
+          <div key={i} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+            <input
+              style={inputStyle}
+              placeholder="雑誌名"
+              value={m.name}
+              onChange={(e) => updateMagazine(i, e.target.value)}
+            />
+            {magazines.length > 1 && (
+              <button type="button" onClick={() => removeMagazine(i)}>削除</button>
+            )}
+          </div>
+        ))}
+        <button type="button" onClick={addMagazine}>＋雑誌追加</button>
       </div>
 
       {/* 内容 */}
@@ -507,8 +580,13 @@ export default function AdminPage() {
                 <td style={{ padding: "0.5rem" }}>{m.title}</td>
                 <td style={{ padding: "0.5rem" }}>{m.title_kana}</td>
                 <td style={{ padding: "0.5rem" }}>
-                  <button style={{ marginRight: "0.5rem" }} onClick={() => handleEdit(m.id)}>編集</button>
-                  <button onClick={() => handleDelete(m.id)}>削除</button>
+                  <button
+                    style={{ marginRight: "0.5rem" }}
+                    onClick={() => handleEdit(m.id!)}
+                  >
+                    編集
+                  </button>
+                  <button onClick={() => handleDelete(m.id!)}>削除</button>
                 </td>
               </tr>
             ))}
